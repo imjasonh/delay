@@ -13,7 +13,7 @@ It is also possible to use a function literal.
 	})
 
 To call a function, invoke its Call method.
-	err = laterFunc.Call(c, queueName, delay.WithArgs("something"))
+	err = laterFunc.Call(ctx, req, queueName, delay.WithArgs("something"))
 A function may be called any number of times. If the function has any
 return arguments, and the last one is of type error, the function may
 return a non-nil error to signal that the function failed and should be
@@ -44,7 +44,6 @@ reserved application path "/internal/queue/go/delay".
 package delay
 
 import (
-	"os"
 	"path"
 
 	"cloud.google.com/go/compute/metadata"
@@ -102,8 +101,6 @@ const (
 type contextKey int
 
 var (
-	hostname string // TODO get this from somewhere
-
 	// registry of all delayed functions
 	funcs = make(map[string]*Function)
 
@@ -174,7 +171,7 @@ type invocation struct {
 }
 
 // Call invokes a delayed function.
-func (f *Function) Call(ctx context.Context, queueName string, opts ...Option) error {
+func (f *Function) Call(ctx context.Context, req *http.Request, queueName string, opts ...Option) error {
 	o := &options{}
 	for _, op := range opts {
 		if err := op(o); err != nil {
@@ -182,7 +179,7 @@ func (f *Function) Call(ctx context.Context, queueName string, opts ...Option) e
 		}
 	}
 
-	t, err := f.task(*o)
+	t, err := f.task(*o, req.Host)
 	if err != nil {
 		return err
 	}
@@ -192,7 +189,7 @@ func (f *Function) Call(ctx context.Context, queueName string, opts ...Option) e
 // Task creates a Task that will invoke the function.
 // Its parameters may be tweaked before adding it to a queue.
 // Users should not modify the Path or Payload fields of the returned Task.
-func (f *Function) task(opts options) (*taskspb.Task, error) {
+func (f *Function) task(opts options, host string) (*taskspb.Task, error) {
 	if f.err != nil {
 		return nil, fmt.Errorf("delay: func is invalid: %v", f.err)
 	}
@@ -258,7 +255,7 @@ func (f *Function) task(opts options) (*taskspb.Task, error) {
 
 	return &taskspb.Task{
 		HttpRequest: &taskspb.HttpRequest{
-			Url:  "https://" + path.Join(hostname, handlerPath),
+			Url:  "https://" + path.Join(host, handlerPath),
 			Body: base64.StdEncoding.EncodeToString(buf.Bytes()),
 		},
 		ScheduleTime: time.Now().Add(opts.Delay).Format(time.RFC3339Nano),
@@ -294,11 +291,6 @@ func addTask(ctx context.Context, t *taskspb.Task, queue string) error {
 var projectID, location string
 
 func Init() {
-	hostname = os.Getenv("HOSTNAME")
-	if hostname == "" {
-		log.Fatal("No HOSTNAME set")
-	}
-
 	var err error
 	projectID, err = metadata.ProjectID()
 	if err != nil {

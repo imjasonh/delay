@@ -29,7 +29,7 @@ var delayFunc = delay.Func("Delayed", func(ctx context.Context, a, b, c string) 
 func handler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	if err := delayFunc.Call(ctx, "my-queue",
+	if err := delayFunc.Call(ctx, r, "my-queue",
 		delay.WithArgs("a", "b", "c"),
 		delay.WithDelay(10*time.Second),
 	); err != nil {

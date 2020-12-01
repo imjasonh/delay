@@ -16,6 +16,8 @@ import (
 
 const queueName = "queue-name"
 
+var req = &http.Request{Host: "dummy"}
+
 type CustomType struct {
 	N int
 }
@@ -126,7 +128,7 @@ func newFakeContext() *fakeContext {
 func TestInvalidFunction(t *testing.T) {
 	c := newFakeContext()
 
-	if got, want := invalidFunc.Call(c.ctx, queueName), fmt.Errorf("delay: func is invalid: %s", errFirstArg); got.Error() != want.Error() {
+	if got, want := invalidFunc.Call(c.ctx, req, queueName), fmt.Errorf("delay: func is invalid: %s", errFirstArg); got.Error() != want.Error() {
 		t.Errorf("Incorrect error: got %q, want %q", got, want)
 	}
 }
@@ -142,14 +144,14 @@ func TestVariadicFunctionArguments(t *testing.T) {
 		return nil
 	}
 
-	varFunc.Call(c.ctx, queueName, WithArgs("hi"))
-	varFunc.Call(c.ctx, queueName, WithArgs("%d", 12))
-	varFunc.Call(c.ctx, queueName, WithArgs("%d %d %d", 3, 1, 4))
+	varFunc.Call(c.ctx, req, queueName, WithArgs("hi"))
+	varFunc.Call(c.ctx, req, queueName, WithArgs("%d", 12))
+	varFunc.Call(c.ctx, req, queueName, WithArgs("%d %d %d", 3, 1, 4))
 	if calls != 3 {
 		t.Errorf("Got %d calls to taskqueueAdder, want 3", calls)
 	}
 
-	if got, want := varFunc.Call(c.ctx, queueName, WithArgs("%d %s", 12, "a string is bad")), errors.New("delay: argument 3 has wrong type: string is not assignable to int"); got.Error() != want.Error() {
+	if got, want := varFunc.Call(c.ctx, req, queueName, WithArgs("%d %s", 12, "a string is bad")), errors.New("delay: argument 3 has wrong type: string is not assignable to int"); got.Error() != want.Error() {
 		t.Errorf("Incorrect error: got %q, want %q", got, want)
 	}
 }
@@ -177,7 +179,7 @@ func TestBadArguments(t *testing.T) {
 		},
 	}
 	for i, tc := range tests {
-		got := regFunc.Call(c.ctx, queueName, WithArgs(tc.args...))
+		got := regFunc.Call(c.ctx, req, queueName, WithArgs(tc.args...))
 		if got.Error() != tc.wantErr {
 			t.Errorf("Call %v: got %q, want %q", i, got, tc.wantErr)
 		}
@@ -199,7 +201,7 @@ func TestRunningFunction(t *testing.T) {
 
 	regFuncRuns, regFuncMsg = 0, "" // reset state
 	const msg = "Why, hello!"
-	regFunc.Call(c.ctx, queueName, WithArgs(msg))
+	regFunc.Call(c.ctx, req, queueName, WithArgs(msg))
 
 	// Simulate the Task Queue service.
 	req, err := http.NewRequest("POST", handlerPath, bytes.NewBuffer(payload(task)))
@@ -231,7 +233,7 @@ func TestCustomType(t *testing.T) {
 	}
 
 	custFuncTally = 0 // reset state
-	custFunc.Call(c.ctx, queueName, WithArgs(&CustomType{N: 11}, CustomImpl(13)))
+	custFunc.Call(c.ctx, req, queueName, WithArgs(&CustomType{N: 11}, CustomImpl(13)))
 
 	// Simulate the Task Queue service.
 	req, err := http.NewRequest("POST", handlerPath, bytes.NewBuffer(payload(task)))
@@ -248,7 +250,7 @@ func TestCustomType(t *testing.T) {
 	// Try the same, but with nil values; one is a nil pointer (and thus a non-nil interface value),
 	// and the other is a nil interface value.
 	custFuncTally = 0 // reset state
-	custFunc.Call(c.ctx, queueName, WithArgs((*CustomType)(nil), nil))
+	custFunc.Call(c.ctx, req, queueName, WithArgs((*CustomType)(nil), nil))
 
 	// Simulate the Task Queue service.
 	req, err = http.NewRequest("POST", handlerPath, bytes.NewBuffer(payload(task)))
@@ -277,7 +279,7 @@ func TestRunningVariadic(t *testing.T) {
 	}
 
 	varFuncMsg = "" // reset state
-	varFunc.Call(c.ctx, queueName, WithArgs("Amiga %d has %d KB RAM", 500, 512))
+	varFunc.Call(c.ctx, req, queueName, WithArgs("Amiga %d has %d KB RAM", 500, 512))
 
 	// Simulate the Task Queue service.
 	req, err := http.NewRequest("POST", handlerPath, bytes.NewBuffer(payload(task)))
@@ -306,7 +308,7 @@ func TestErrorFunction(t *testing.T) {
 		return nil
 	}
 
-	errFunc.Call(c.ctx, queueName)
+	errFunc.Call(c.ctx, req, queueName)
 
 	// Simulate the Task Queue service.
 	// The first call should succeed; the second call should fail.
@@ -344,13 +346,13 @@ func TestDuplicateFunction(t *testing.T) {
 		return nil
 	}
 
-	if err := dupe1Func.Call(c.ctx, queueName); err == nil {
+	if err := dupe1Func.Call(c.ctx, req, queueName); err == nil {
 		t.Error("dupe1Func.Call did not return error")
 	}
 	if task != nil {
 		t.Error("dupe1Func.Call posted a task")
 	}
-	if err := dupe2Func.Call(c.ctx, queueName); err != nil {
+	if err := dupe2Func.Call(c.ctx, req, queueName); err != nil {
 		t.Errorf("dupe2Func.Call error: %v", err)
 	}
 	if task == nil {
@@ -394,7 +396,7 @@ func TestGetRequestHeadersFromContext(t *testing.T) {
 		return nil
 	}
 
-	reqFunc.Call(c.ctx, queueName)
+	reqFunc.Call(c.ctx, req, queueName)
 
 	reqFuncRuns, reqFuncHeaders = 0, nil // reset state
 	// Simulate the Task Queue service.

@@ -44,11 +44,6 @@ reserved application path "/internal/queue/go/delay".
 package delay
 
 import (
-	"path"
-
-	"cloud.google.com/go/compute/metadata"
-	taskspb "google.golang.org/api/cloudtasks/v2beta3"
-
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -57,20 +52,28 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"path"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
+
+	"cloud.google.com/go/compute/metadata"
+	taskspb "google.golang.org/api/cloudtasks/v2beta3"
+	"google.golang.org/api/idtoken"
 )
 
 type options struct {
 	Args  []interface{}
 	Delay time.Duration
 }
+
+// Option describes an optional configuration when invoking a delayed function.
 type Option func(o *options) error
 
+// WithArgs encodes and passes the args to the delayed function invocation.
 func WithArgs(i ...interface{}) Option {
 	return func(o *options) error {
 		o.Args = i
@@ -78,6 +81,8 @@ func WithArgs(i ...interface{}) Option {
 	}
 }
 
+// WithDelay instructs the Task Queue to delay invocation of the function until
+// some time in the future.
 func WithDelay(d time.Duration) Option {
 	return func(o *options) error {
 		o.Delay = d
@@ -166,8 +171,8 @@ func Func(key string, i interface{}) *Function {
 }
 
 type invocation struct {
-	Key     string
-	Options options
+	Key  string
+	Args []interface{}
 }
 
 // Call invokes a delayed function.
@@ -242,10 +247,8 @@ func (f *Function) task(opts options, host string) (*taskspb.Task, error) {
 	}
 
 	inv := invocation{
-		Key: f.key,
-		Options: options{
-			Args: opts.Args,
-		},
+		Key:  f.key,
+		Args: opts.Args,
 	}
 
 	buf := new(bytes.Buffer)
@@ -257,6 +260,9 @@ func (f *Function) task(opts options, host string) (*taskspb.Task, error) {
 		HttpRequest: &taskspb.HttpRequest{
 			Url:  "https://" + path.Join(host, handlerPath),
 			Body: base64.StdEncoding.EncodeToString(buf.Bytes()),
+			OidcToken: &taskspb.OidcToken{
+				ServiceAccountEmail: email,
+			},
 		},
 		ScheduleTime: time.Now().Add(opts.Delay).Format(time.RFC3339Nano),
 		// TODO: OIDC ID token: https://cloud.google.com/run/docs/authenticating/service-to-service#go
@@ -288,7 +294,10 @@ func addTask(ctx context.Context, t *taskspb.Task, queue string) error {
 	return err
 }
 
-var projectID, location string
+var projectID, location, email string
+var validator interface {
+	Validate(context.Context, string, string) (*idtoken.Payload, error)
+}
 
 func Init() {
 	var err error
@@ -301,6 +310,16 @@ func Init() {
 		log.Fatalf("error getting region: %v", err)
 	}
 	location = strings.TrimSuffix(location, "-1")
+
+	email, err = metadata.Email("default")
+	if err != nil {
+		log.Fatalf("error getting service account email: %v", err)
+	}
+
+	validator, err = idtoken.NewValidator(context.Background())
+	if err != nil {
+		log.Fatalf("idtoken.NewValidator: %v", err)
+	}
 
 	http.HandleFunc(handlerPath, func(w http.ResponseWriter, req *http.Request) {
 		runFunc(req.Context(), w, req)
@@ -347,8 +366,13 @@ func parseRequestHeaders(h http.Header) *RequestHeaders {
 func runFunc(ctx context.Context, w http.ResponseWriter, req *http.Request) {
 	defer req.Body.Close()
 
-	// TODO: validate ID token
-	// https://developers.google.com/identity/protocols/oauth2/openid-connect#validatinganidtoken
+	// Validate ID token.
+	// TODO aud
+	if _, err := validator.Validate(ctx, strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer "), ""); err != nil {
+		log.Printf("delay: idtoken Validate: %v", err)
+		log.Printf("delay: dropping task")
+		return
+	}
 
 	ctx = context.WithValue(ctx, headersContextKey, parseRequestHeaders(req.Header))
 
@@ -368,7 +392,7 @@ func runFunc(ctx context.Context, w http.ResponseWriter, req *http.Request) {
 
 	ft := f.fv.Type()
 	in := []reflect.Value{reflect.ValueOf(ctx)}
-	for _, arg := range inv.Options.Args {
+	for _, arg := range inv.Args {
 		var v reflect.Value
 		if arg != nil {
 			v = reflect.ValueOf(arg)

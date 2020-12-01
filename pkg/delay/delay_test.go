@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	taskspb "google.golang.org/api/cloudtasks/v2beta3"
+	"google.golang.org/api/idtoken"
 )
 
 const queueName = "queue-name"
@@ -33,6 +34,14 @@ func (c CustomImpl) N() int { return int(c) }
 // CustomImpl needs to be registered with gob.
 func init() {
 	gob.Register(CustomImpl(0))
+
+	validator = fakeValidator{}
+}
+
+type fakeValidator struct{}
+
+func (fakeValidator) Validate(context.Context, string, string) (*idtoken.Payload, error) {
+	return nil, nil
 }
 
 func payload(t *taskspb.Task) []byte {

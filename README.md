@@ -12,11 +12,15 @@ package is intended to be used with Cloud Run.
 `google.golang.org/appengine/delay` to Cloud Run apps, to make it simpler to
 enqueue work to be handled later using Cloud Tasks.
 
-# Prerequisites
+## Prerequisites
 
 You must create the Task Queue yourself, which requires creating an App Engine
 application. That application and region must match the region where the Cloud
 Run service is deployed.
+
+This package currently depends on an environment variable named `HOSTNAME`
+being present at runtime, populated with the URL where the service is running,
+e.g., `service-blahblah-ue.a.run.app`.
 
 ## Usage
 

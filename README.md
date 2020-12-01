@@ -1,5 +1,9 @@
 # `delay`
 
+<p align="center">
+  <img alt="Image of relay race" src="./relay.jpg">
+</p>
+
 **NOTE:** This is not an official Google project. It's an experimental
 derivative of the
 [`google.golang.org/appengine/delay`](https://google.golang.org/appengine/delay)

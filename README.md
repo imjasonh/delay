@@ -40,7 +40,15 @@ var laterFunc = delay.Func("my-key", func(ctx context.Context, some, args string
 })
 ```
 
-To call the function, invoke its `Call` method.
+Before calling the function you should also initialize the package:
+
+```
+func init() {
+	delay.Init()
+}
+```
+
+Then, to call the function, invoke its `Call` method.
 
 ```
 err := laterFunc.Call(ctx, queueName, delay.WithArgs("arg", "values"))

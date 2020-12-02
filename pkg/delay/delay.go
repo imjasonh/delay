@@ -260,12 +260,10 @@ func (f *Function) task(opts options, host string) (*taskspb.Task, error) {
 		HttpRequest: &taskspb.HttpRequest{
 			Url:  "https://" + path.Join(host, handlerPath),
 			Body: base64.StdEncoding.EncodeToString(buf.Bytes()),
-			OidcToken: &taskspb.OidcToken{
-				ServiceAccountEmail: email,
-			},
+			// https://cloud.google.com/run/docs/authenticating/service-to-service#go
+			OidcToken: &taskspb.OidcToken{ServiceAccountEmail: email},
 		},
 		ScheduleTime: time.Now().Add(opts.Delay).Format(time.RFC3339Nano),
-		// TODO: OIDC ID token: https://cloud.google.com/run/docs/authenticating/service-to-service#go
 	}, nil
 }
 
@@ -278,7 +276,8 @@ func GetRequestHeaders(ctx context.Context) (*RequestHeaders, error) {
 	return nil, errOutsideDelayFunc
 }
 
-var taskqueueAdder = addTask // for testing
+var taskqueueAdder = addTask           // for testing
+var validateIDToken = idtoken.Validate // for testing
 
 func addTask(ctx context.Context, t *taskspb.Task, queue string) error {
 	log.Printf("adding task to queue %q", queue)
@@ -295,9 +294,6 @@ func addTask(ctx context.Context, t *taskspb.Task, queue string) error {
 }
 
 var projectID, location, email string
-var validator interface {
-	Validate(context.Context, string, string) (*idtoken.Payload, error)
-}
 
 func Init() {
 	var err error
@@ -314,11 +310,6 @@ func Init() {
 	email, err = metadata.Email("default")
 	if err != nil {
 		log.Fatalf("error getting service account email: %v", err)
-	}
-
-	validator, err = idtoken.NewValidator(context.Background())
-	if err != nil {
-		log.Fatalf("idtoken.NewValidator: %v", err)
 	}
 
 	http.HandleFunc(handlerPath, func(w http.ResponseWriter, req *http.Request) {
@@ -368,7 +359,7 @@ func runFunc(ctx context.Context, w http.ResponseWriter, req *http.Request) {
 
 	// Validate ID token.
 	// TODO aud
-	if _, err := validator.Validate(ctx, strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer "), ""); err != nil {
+	if _, err := validateIDToken(ctx, strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer "), ""); err != nil {
 		log.Printf("delay: idtoken Validate: %v", err)
 		log.Printf("delay: dropping task")
 		return

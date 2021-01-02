@@ -51,7 +51,7 @@ func init() {
 Then, to call the function, invoke its `Call` method.
 
 ```
-err := laterFunc.Call(ctx, queueName, delay.WithArgs("arg", "values"))
+err := laterFunc.Call(ctx, req, queueName, delay.WithArgs("arg", "values"))
 ```
 
 Each time the function is invoked, a Cloud Task will be enqueued which will be

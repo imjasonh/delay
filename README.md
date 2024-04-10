@@ -27,15 +27,15 @@ Run service is deployed.
 First, register your handler function. This must be done at init-time.
 
 ```
-import "github.com/imjasonh/delay/pkg/delay"
+import "github.com/imjasonh/delay/"
 
-var laterFunc = delay.Func("my-key", myFunc)
+var laterFunc = delay.Func(myFunc)
 ```
 
 You can also use a function literal:
 
 ```
-var laterFunc = delay.Func("my-key", func(ctx context.Context, some, args string) error {
+var laterFunc = delay.Func(func(ctx context.Context, some, args string) error {
 	...
 })
 ```
@@ -51,12 +51,12 @@ func init() {
 Then, to call the function, invoke its `Call` method.
 
 ```
-err := laterFunc.Call(ctx, req, queueName, delay.WithArgs("arg", "values"))
+err := laterFunc.Call(ctx, req, queueName, "arg1", "arg2", "arg3")
 ```
 
 Each time the function is invoked, a Cloud Task will be enqueued which will be
 handled by the specified handler function.
 
-You can also schedule invocation for a time in the future with, for example,
-`delay.WithDelay(time.Minute)`. This instructs the Cloud Tasks queue to invoke
-the function one minute in the future.
+You can also schedule invocation for a time in the future with
+`laterFunc.Delay`, specifying a duration to wait. This instructs the Cloud
+Tasks queue to invoke the function at a time in the future.

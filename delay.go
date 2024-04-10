@@ -2,25 +2,33 @@
 Package delay provides a way to execute code outside the scope of a
 user request by using the Cloud Tasks API.
 
-To declare a function that may be executed later, call Func
-in a top-level assignment context, passing it an arbitrary string key
-and a function whose first argument is of type context.Context.
-The key is used to look up the function so it can be called later.
-	var laterFunc = delay.Func("key", myFunc)
+To declare a function that may be executed later, call Func in a top-level
+assignment context, passing it a function whose first argument is of type
+context.Context.
+
+	var laterFunc = delay.Func(myFunc)
+
 It is also possible to use a function literal.
-	var laterFunc = delay.Func("key", func(ctx context.Context, x string) {
+
+	var laterFunc = delay.Func(func(ctx context.Context, x string) {
 		// ...
 	})
 
 To call a function, invoke its Call method.
-	err = laterFunc.Call(ctx, req, queueName, delay.WithArgs("something"))
+
+	err = laterFunc.Call(ctx, req, queueName, "something", 42, 3.14)
+
+To call a function after a delay, invoke its Delay method.
+
+	err = laterFunc.Delay(ctx, req, queueName, time.Minute, "something", 42, 3.14)
+
 A function may be called any number of times. If the function has any
 return arguments, and the last one is of type error, the function may
 return a non-nil error to signal that the function failed and should be
-retried.
+retried. Other return values are ignored.
 
 The arguments to functions may be of any type that is encodable by the gob
-package. If an argument is of interface type, it is the client's responsibility
+package. If an argument is of interface{} type, it is the client's responsibility
 to register with the gob package whatever concrete type may be passed for that
 argument; see http://golang.org/pkg/gob/#Register for details.
 
@@ -34,9 +42,9 @@ with the string key that was passed to the Func function. Updating an app
 with pending function invocations should safe as long as the relevant
 functions have the (filename, key) combination preserved. The filename is
 parsed according to these rules:
-  * Paths in package main are shortened to just the file name (github.com/foo/foo.go -> foo.go)
-  * Paths are stripped to just package paths (/go/src/github.com/foo/bar.go -> github.com/foo/bar.go)
-  * Module versions are stripped (/go/pkg/mod/github.com/foo/bar@v0.0.0-20181026220418-f595d03440dc/baz.go -> github.com/foo/bar/baz.go)
+  - Paths in package main are shortened to just the file name (github.com/foo/foo.go -> foo.go)
+  - Paths are stripped to just package paths (/go/src/github.com/foo/bar.go -> github.com/foo/bar.go)
+  - Module versions are stripped (/go/pkg/mod/github.com/foo/bar@v0.0.0-20181026220418-f595d03440dc/baz.go -> github.com/foo/bar/baz.go)
 
 The delay package uses the Cloud Tasks API to create tasks that call the
 reserved application path "/internal/queue/go/delay".
@@ -50,7 +58,6 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"path"
 	"path/filepath"
@@ -61,34 +68,10 @@ import (
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
-	taskspb "google.golang.org/api/cloudtasks/v2beta3"
+	"github.com/chainguard-dev/clog"
+	taskspb "google.golang.org/api/cloudtasks/v2"
 	"google.golang.org/api/idtoken"
 )
-
-type options struct {
-	Args  []interface{}
-	Delay time.Duration
-}
-
-// Option describes an optional configuration when invoking a delayed function.
-type Option func(o *options) error
-
-// WithArgs encodes and passes the args to the delayed function invocation.
-func WithArgs(i ...interface{}) Option {
-	return func(o *options) error {
-		o.Args = i
-		return nil
-	}
-}
-
-// WithDelay instructs the Task Queue to delay invocation of the function until
-// some time in the future.
-func WithDelay(d time.Duration) Option {
-	return func(o *options) error {
-		o.Delay = d
-		return nil
-	}
-}
 
 // Function represents a function that may have a delayed invocation.
 type Function struct {
@@ -97,11 +80,8 @@ type Function struct {
 	err error // any error during initialization
 }
 
-const (
-	// The HTTP path for invocations.
-	// TODO: make this configurable.
-	handlerPath = "/internal/queue/go/delay"
-)
+// The HTTP path for invocations.
+const handlerPath = "/internal/queue/go/delay"
 
 type contextKey int
 
@@ -113,8 +93,7 @@ var (
 	errorType = reflect.TypeOf((*error)(nil)).Elem()
 
 	// errors
-	errFirstArg         = errors.New("first argument must be context.Context")
-	errOutsideDelayFunc = errors.New("request headers are only available inside a delay.Func")
+	errFirstArg = errors.New("first argument must be context.Context")
 
 	// context keys
 	headersContextKey contextKey = 0
@@ -123,27 +102,35 @@ var (
 
 func isContext(t reflect.Type) bool { return t == stdContextType }
 
-// Func declares a new Function. The second argument must be a function with a
-// first argument of type context.Context.
+// Func declares a new Function. The argument must be a function with
+// context.Context as its first argument.
+//
 // This function must be called at program initialization time. That means it
 // must be called in a global variable declaration or from an init function.
 // This restriction is necessary because the instance that delays a function
 // call may not be the one that executes it. Only the code executed at program
 // initialization time is guaranteed to have been run by an instance before it
 // receives a request.
-func Func(key string, i interface{}) *Function {
+func Func(i interface{}) *Function {
 	f := &Function{fv: reflect.ValueOf(i)}
 
-	// Derive unique, somewhat stable key for this func.
-	_, file, _, _ := runtime.Caller(1)
-	fk := filepath.Base(file)
-	f.key = fk + ":" + key
-
+	// Check that i is a function.
 	t := f.fv.Type()
 	if t.Kind() != reflect.Func {
 		f.err = errors.New("not a function")
 		return f
 	}
+
+	// Name of the function being passed.
+	// For package-level functions, this is the fully-qualified name, e.g., "main.foo".
+	// For anonymous functions, this is named like "main.func1".
+	key := runtime.FuncForPC(f.fv.Pointer()).Name()
+
+	// Derive a unique, somewhat stable key for this func.
+	_, file, _, _ := runtime.Caller(1)
+	fk := filepath.Base(file)
+	f.key = fk + ":" + key
+
 	if t.NumIn() == 0 || !isContext(t.In(0)) {
 		f.err = errFirstArg
 		return f
@@ -175,18 +162,16 @@ type invocation struct {
 	Args []interface{}
 }
 
-// Call invokes a delayed function.
-func (f *Function) Call(ctx context.Context, req *http.Request, queueName string, opts ...Option) error {
-	o := &options{}
-	for _, op := range opts {
-		if err := op(o); err != nil {
-			return err
-		}
-	}
+// Call invokes a delayed function immediately.
+func (f *Function) Call(ctx context.Context, req *http.Request, queueName string, args ...interface{}) error {
+	return f.Delay(ctx, req, queueName, 0, args...)
+}
 
-	t, err := f.task(*o, req.Host)
+// Call invokes a delayed function after a delay.
+func (f *Function) Delay(ctx context.Context, req *http.Request, queueName string, delay time.Duration, args ...interface{}) error {
+	t, err := f.task(req.Host, delay, args...)
 	if err != nil {
-		return err
+		return fmt.Errorf("new task: %w", err)
 	}
 	return taskqueueAdder(ctx, t, queueName)
 }
@@ -194,12 +179,12 @@ func (f *Function) Call(ctx context.Context, req *http.Request, queueName string
 // Task creates a Task that will invoke the function.
 // Its parameters may be tweaked before adding it to a queue.
 // Users should not modify the Path or Payload fields of the returned Task.
-func (f *Function) task(opts options, host string) (*taskspb.Task, error) {
+func (f *Function) task(host string, delay time.Duration, args ...interface{}) (*taskspb.Task, error) {
 	if f.err != nil {
 		return nil, fmt.Errorf("delay: func is invalid: %v", f.err)
 	}
 
-	nArgs := len(opts.Args) + 1 // +1 for the context.Context
+	nArgs := len(args) + 1 // +1 for the context.Context
 	ft := f.fv.Type()
 	minArgs := ft.NumIn()
 	if ft.IsVariadic() {
@@ -214,7 +199,7 @@ func (f *Function) task(opts options, host string) (*taskspb.Task, error) {
 
 	// Check arg types.
 	for i := 1; i < nArgs; i++ {
-		at := reflect.TypeOf(opts.Args[i-1])
+		at := reflect.TypeOf(args[i-1])
 		var dt reflect.Type
 		if i < minArgs {
 			// not a variadic arg
@@ -234,11 +219,11 @@ func (f *Function) task(opts options, host string) (*taskspb.Task, error) {
 		}
 		switch at.Kind() {
 		case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
-			av := reflect.ValueOf(opts.Args[i-1])
+			av := reflect.ValueOf(args[i-1])
 			if av.IsNil() {
 				// nil value in interface; not supported by gob, so we replace it
 				// with a nil interface value
-				opts.Args[i-1] = nil
+				args[i-1] = nil
 			}
 		}
 		if !at.AssignableTo(dt) {
@@ -248,7 +233,7 @@ func (f *Function) task(opts options, host string) (*taskspb.Task, error) {
 
 	inv := invocation{
 		Key:  f.key,
-		Args: opts.Args,
+		Args: args,
 	}
 
 	buf := new(bytes.Buffer)
@@ -263,34 +248,42 @@ func (f *Function) task(opts options, host string) (*taskspb.Task, error) {
 			// https://cloud.google.com/run/docs/authenticating/service-to-service#go
 			OidcToken: &taskspb.OidcToken{ServiceAccountEmail: email},
 		},
-		ScheduleTime: time.Now().Add(opts.Delay).Format(time.RFC3339Nano),
+		ScheduleTime: time.Now().Add(delay).Format(time.RFC3339Nano),
 	}, nil
 }
 
 // Request returns the special task-queue HTTP request headers for the current
 // task queue handler. Returns an error if called from outside a delay.Func.
-func GetRequestHeaders(ctx context.Context) (*RequestHeaders, error) {
-	if ret, ok := ctx.Value(headersContextKey).(*RequestHeaders); ok {
-		return ret, nil
+func MetaFromContext(ctx context.Context) Meta {
+	if ret, ok := ctx.Value(headersContextKey).(Meta); ok {
+		return ret
 	}
-	return nil, errOutsideDelayFunc
+	clog.FromContext(ctx).Error("delay: GetRequestHeaders called outside delay.Func")
+	return Meta{}
 }
 
 var taskqueueAdder = addTask           // for testing
 var validateIDToken = idtoken.Validate // for testing
 
 func addTask(ctx context.Context, t *taskspb.Task, queue string) error {
-	log.Printf("adding task to queue %q", queue)
+	clog.FromContext(ctx).With("queue", queue).Info("adding task to queue")
+
+	if queue == "" {
+		return errors.New("delay: empty queue name")
+	}
 
 	svc, err := taskspb.NewService(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating task service: %w", err)
 	}
+
 	parent := fmt.Sprintf("projects/%s/locations/%s/queues/%s", projectID, location, queue)
-	_, err = svc.Projects.Locations.Queues.Tasks.Create(parent, &taskspb.CreateTaskRequest{
+	if _, err := svc.Projects.Locations.Queues.Tasks.Create(parent, &taskspb.CreateTaskRequest{
 		Task: t,
-	}).Do()
-	return err
+	}).Do(); err != nil {
+		return fmt.Errorf("creating task: %w", err)
+	}
+	return nil
 }
 
 var projectID, location, email string
@@ -299,17 +292,17 @@ func Init() {
 	var err error
 	projectID, err = metadata.ProjectID()
 	if err != nil {
-		log.Fatalf("error getting project ID: %v", err)
+		clog.Fatalf("error getting project ID: %v", err)
 	}
 	location, err = metadata.Zone()
 	if err != nil {
-		log.Fatalf("error getting region: %v", err)
+		clog.Fatalf("error getting region: %v", err)
 	}
 	location = strings.TrimSuffix(location, "-1")
 
 	email, err = metadata.Email("default")
 	if err != nil {
-		log.Fatalf("error getting service account email: %v", err)
+		clog.Fatalf("error getting service account email: %v", err)
 	}
 
 	http.HandleFunc(handlerPath, func(w http.ResponseWriter, req *http.Request) {
@@ -317,67 +310,98 @@ func Init() {
 	})
 }
 
-// RequestHeaders are the special HTTP request headers available to push task
-// HTTP request handlers. These headers are set internally by App Engine.
+// Meta contains the special HTTP request headers available to push task
+// HTTP request handlers. These headers are set internally by Cloud Tasks.
+//
 // See https://cloud.google.com/appengine/docs/standard/go/taskqueue/push/creating-handlers#reading_request_headers
 // for a description of the fields.
 // https://cloud.google.com/tasks/docs/creating-http-target-tasks#handler
-type RequestHeaders struct {
-	QueueName            string
-	TaskName             string
-	TaskRetryCount       int64
-	TaskExecutionCount   int64
-	TaskETA              time.Time
-	TaskPreviousResponse int
-	TaskRetryReason      string
+type Meta struct {
+	// The name of the queue.
+	QueueName string `json:"queueName,omitempty"`
+
+	// The "short" name of the task; a unique system-generated id.
+	TaskName string `json:"taskName,omitempty"`
+
+	// The number of times this task has been retried. For the first attempt,
+	// this value is 0. This number includes attempts where the task failed due
+	// to 5XX error codes and never reached the execution phase.
+	TaskRetryCount int64 `json:"taskRetryCount,omitempty"`
+
+	// The total number of times that the task has received a response from the
+	// handler. Since Cloud Tasks deletes the task once a successful response
+	// has been received, all previous handler responses were failures. This
+	// number does not include failures due to 5XX error codes.
+	TaskExecutionCount int64 `json:"taskExecutionCount,omitempty"`
+
+	// The schedule time of the task.
+	TaskETA *time.Time `json:"taskETA,omitempty"`
+
+	// The HTTP response code from the previous retry.
+	TaskPreviousResponse int `json:"taskPreviousResponse,omitempty"`
+
+	// The reason for retrying the task.
+	TaskRetryReason string `json:"taskRetryReason,omitempty"`
 }
 
 // parseRequestHeaders parses the special HTTP request headers available to push
 // task request handlers. This function silently ignores values of the wrong
 // format.
-func parseRequestHeaders(h http.Header) *RequestHeaders {
-	ret := &RequestHeaders{
+func parseRequestHeaders(h http.Header) Meta {
+	ret := Meta{
 		QueueName: h.Get("X-CloudTasks-QueueName"),
 		TaskName:  h.Get("X-CloudTasks-TaskName"),
 	}
-
-	ret.TaskRetryCount, _ = strconv.ParseInt(h.Get("X-CloudTasks-TaskRetryCount"), 10, 64)
-	ret.TaskExecutionCount, _ = strconv.ParseInt(h.Get("X-CloudTasks-TaskExecutionCount"), 10, 64)
-
-	etaSecs, _ := strconv.ParseInt(h.Get("X-CloudTasks-TaskETA"), 10, 64)
-	if etaSecs != 0 {
-		ret.TaskETA = time.Unix(etaSecs, 0)
+	if val, _ := strconv.ParseInt(h.Get("X-CloudTasks-TaskRetryCount"), 10, 64); val != 0 {
+		ret.TaskRetryCount = val
 	}
-
-	ret.TaskPreviousResponse, _ = strconv.Atoi(h.Get("X-CloudTasks-TaskPreviousResponse"))
-	ret.TaskRetryReason = h.Get("X-CloudTasks-TaskRetryReason")
+	if val, _ := strconv.ParseInt(h.Get("X-CloudTasks-TaskExecutionCount"), 10, 64); val != 0 {
+		ret.TaskExecutionCount = val
+	}
+	if etaSecs, _ := strconv.ParseInt(h.Get("X-CloudTasks-TaskETA"), 10, 64); etaSecs != 0 {
+		t := time.Unix(etaSecs, 0)
+		ret.TaskETA = &t
+	}
+	if val, _ := strconv.Atoi(h.Get("X-CloudTasks-TaskPreviousResponse")); val != 0 {
+		ret.TaskPreviousResponse = val
+	}
+	if val := h.Get("X-CloudTasks-TaskRetryReason"); val != "" {
+		ret.TaskRetryReason = val
+	}
 	return ret
 }
 
 func runFunc(ctx context.Context, w http.ResponseWriter, req *http.Request) {
 	defer req.Body.Close()
 
-	// Validate ID token.
-	// TODO aud
-	if _, err := validateIDToken(ctx, strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer "), ""); err != nil {
-		log.Printf("delay: idtoken Validate: %v", err)
-		log.Printf("delay: dropping task")
+	log := clog.FromContext(ctx)
+
+	// Validate ID token, including the audience, which will be the original
+	// request host+handlerPath.
+	tok := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+	aud := "https://" + path.Join(req.Host, handlerPath)
+	if _, err := validateIDToken(ctx, tok, aud); err != nil {
+		log.Errorf("delay: idtoken Validate: %v", err)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	ctx = context.WithValue(ctx, headersContextKey, parseRequestHeaders(req.Header))
+	meta := parseRequestHeaders(req.Header)
+	ctx = context.WithValue(ctx, headersContextKey, meta)
+	log = log.With("meta", meta)
+	ctx = clog.WithLogger(ctx, log)
 
 	var inv invocation
 	if err := gob.NewDecoder(req.Body).Decode(&inv); err != nil {
-		log.Printf("delay: failed decoding task payload: %v", err)
-		log.Printf("delay: dropping task")
+		log.Errorf("delay: failed decoding task payload: %v", err)
+		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
 
 	f := funcs[inv.Key]
 	if f == nil {
-		log.Printf("delay: no func with key %q found", inv.Key)
-		log.Printf("delay: dropping task")
+		log.Errorf("delay: no func with key %q found", inv.Key)
+		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
 
@@ -405,7 +429,7 @@ func runFunc(ctx context.Context, w http.ResponseWriter, req *http.Request) {
 
 	if n := ft.NumOut(); n > 0 && ft.Out(n-1) == errorType {
 		if errv := out[n-1]; !errv.IsNil() {
-			log.Printf("delay: func failed (will retry): %v", errv.Interface())
+			log.Warnf("delay: func failed (will retry): %v", errv.Interface())
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
